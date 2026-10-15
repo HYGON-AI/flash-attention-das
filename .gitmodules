@@ -1,0 +1,4 @@
+[submodule "csrc/cutlass"]
+    path = csrc/cutlass
+    url = ../cutlass_3.2.1/
+    branch = feature/16x64-mmac-aicc

@@ -1,0 +1,13 @@
+// Copyright (c) 2026, Attnmask extension.
+// Splitting the different head dimensions to different files to speed up compilation.
+
+#include "flash_fwd_attnmask_launch_template.h"
+
+template void run_mha_fwd_attnmask_<cutlass::half_t, 32, true>(
+    Flash_fwd_params_attnmask &params, cudaStream_t stream);
+
+template void run_mha_fwd_attnmask_bias_<cutlass::half_t, 32, true>(
+    Flash_fwd_params_attnmask &params, cudaStream_t stream);
+
+template void run_mha_fwd_attnmask_additive_<cutlass::half_t, 32, true>(
+    Flash_fwd_params_attnmask &params, cudaStream_t stream);
