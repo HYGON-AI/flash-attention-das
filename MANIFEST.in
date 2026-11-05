@@ -1,0 +1,13 @@
+recursive-include csrc *.cu
+recursive-include csrc *.h
+recursive-include csrc *.cuh
+recursive-include csrc *.cpp
+recursive-include csrc *.hpp
+
+recursive-include flash_attn *.cu
+recursive-include flash_attn *.h
+recursive-include flash_attn *.cuh
+recursive-include flash_attn *.cpp
+recursive-include flash_attn *.hpp
+include LICENSE AUTHORS NOTICE THIRD_PARTY_NOTICES.md README.md
+recursive-include LICENSES *

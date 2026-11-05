@@ -1,0 +1,35 @@
+flash-attention-das
+Copyright (c) 2024-2026 Hygon Information Technology Co., Ltd.
+
+This product includes software derived from FlashAttention / FlashAttention-2:
+https://github.com/Dao-AILab/flash-attention.git
+Fixed upstream baseline: v2.6.1 / 7551202cb2dd245432bc878447e19015c0af3c22.
+
+The original BSD-3-Clause license and contributor declaration are retained in
+LICENSE. Original contributor attribution is retained in AUTHORS and the
+corresponding source file headers.
+
+HYGON Contributions
+
+Modified by Hygon Information Technology Co., Ltd.
+
+Hygon's contributions comprise the platform-specific implementation and
+integration work for this HCU adaptation: HIP toolchain and architecture
+support; attention-kernel data layouts, memory access and scheduling; and
+HCU paths for FP8, separate QK/V head dimensions, paged and prefix-cache
+attention, explicit masks and sparse attention.
+
+They also include Python and native-interface extensions, backend selection
+and dispatch, and the associated build, packaging, test and benchmark
+infrastructure maintained for these HCU implementations.
+
+The Hygon copyright statement covers only Hygon's original code and original
+portions of its modifications. It does not replace or override the copyright
+statements of Tri Dao, other FlashAttention contributors, or the rights
+holders of incorporated third-party software. Their copyright, attribution
+and license notices remain applicable.
+
+Source projects, reference versions, copyright attributions and component
+licenses are listed in THIRD_PARTY_NOTICES.md. Third-party license texts are
+distributed in LICENSES/. AOTriton/Triton sources retain MIT notices, and the
+SpargeAttn-derived sparse_utils.py retains Apache-2.0 notices.

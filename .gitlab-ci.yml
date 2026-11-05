@@ -1,0 +1,234 @@
+stages:
+  - quality-gate
+  - build
+  - publish
+
+variables:
+  GIT_SUBMODULE_STRATEGY: "none"
+  HARBOR_SITE: "10.16.1.152:5000"
+  AICC_BASE_URL: "http://10.16.1.201:8000/ai_cc/Nightly"
+  DTK_VERSION: "26.10"
+
+quality-gate:
+  stage: quality-gate
+  allow_failure: true
+  variables:
+    GIT_DEPTH: "0"
+    GIT_STRATEGY: "clone"
+    GIT_CLEAN_FLAGS: "-ffdx"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "aicc-master-dev"'
+  tags:
+    - nmz
+  script:
+    - PIP_TRUSTED_HOST="$(python -c 'import os; from urllib.parse import urlsplit; print(urlsplit(os.environ["PYPI_URL"]).hostname)')"
+    - export PIP_TRUSTED_HOST
+    - export GATE_PIP_INDEX_URL="${PYPI_URL}/open/deps/+simple/"
+    - >-
+      python -m pip install "hygon_quality_gate[scanners]"
+      -i "${GATE_PIP_INDEX_URL}"
+      --trusted-host "${PIP_TRUSTED_HOST}"
+    - python -m hygon_pr_gate.install_tools
+    - echo "===== Git status before cleanup ====="
+    - git status --short --untracked-files=all
+    - git diff --stat
+    - git fetch origin "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}"
+    - git reset --hard "${CI_COMMIT_SHA}"
+    - git clean -ffdx
+    - |
+      if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+        echo "ERROR: Git workspace is still dirty after cleanup"
+        git status --short --untracked-files=all
+        exit 1
+      fi
+    - quality-pr-scan --base "origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}" --head "${CI_COMMIT_SHA}"
+
+build:flashattn-wheel:
+  stage: build
+  variables:
+    GIT_DEPTH: "0"
+  image: "${HARBOR_SITE}/hcu/base/dtk:${DTK_VERSION}-rockylinux8.6-py${PY_VERSION}"
+  timeout: 3h
+  parallel:
+    matrix:
+      - RUNNER_TAG: [nmz, bw]
+        PY_VERSION: "3.12"
+        TORCH_VERSION: ["2.11.0", "2.13.0"]
+  tags:
+    - ${RUNNER_TAG}
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "aicc-master-dev"'
+  before_script:
+    - PIP_TRUSTED_HOST="$(python -c 'import os; from urllib.parse import urlsplit; print(urlsplit(os.environ["PYPI_URL"]).hostname)')"
+    - export PIP_TRUSTED_HOST
+    - export DTK_PIP_INDEX_URL="${PYPI_URL}/nightly/dtk${DTK_VERSION//./}/+simple/"
+    - PIP_CONSTRAINT="$(mktemp)"
+    - export PIP_CONSTRAINT
+    - export PYTHON=python
+    - >-
+      python -m pip install "torch==${TORCH_VERSION}" triton
+      -i "${DTK_PIP_INDEX_URL}"
+      --trusted-host "${PIP_TRUSTED_HOST}"
+    - python -m pip install vllm --no-deps -i "${DTK_PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}"
+    # Configure non-interactive Git authentication without changing remote URL.
+    - |
+      cat > /tmp/git-askpass.sh << 'SCRIPT'
+      #!/bin/sh
+      case "$1" in
+        *Username*) echo "gitlab-ci-token" ;;
+        *Password*) echo "$GIT_TOKEN" ;;
+      esac
+      SCRIPT
+    - chmod 700 /tmp/git-askpass.sh
+    - export GIT_ASKPASS=/tmp/git-askpass.sh
+    - export GIT_TERMINAL_PROMPT=0
+    - export GIT_TOKEN="${CI_JOB_TOKEN}"
+    # Test the prospective merge result against target branch.
+    - git config user.email "ci@local"
+    - git config user.name "CI"
+    - git fetch origin "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}"
+    - git merge "origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}" --no-edit
+    # Detach-avoidance: create a named branch so optest --test_dir can
+    # identify the branch for its output directory.
+    - git checkout -B _ci_mr
+  script:
+    - curl -fsSL "${AICC_BASE_URL}/hcu_llvm_installer.sh" -o /tmp/hcu_llvm_installer.sh
+    - bash /tmp/hcu_llvm_installer.sh
+    - FLASH_ATTN_HG_SPLIT_CORE=1 bash ci_script/build_wheel_and_manylinux.sh
+    - python ci_script/check_hg_wheel.py --wheel dist/*manylinux*.whl --expected-mode split
+    - python -m pip install optest -i "${DTK_PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}"
+    - python -m pip install --force-reinstall --no-deps dist/*manylinux*.whl
+    - |
+      optest_status=0
+      optest --op_name flashattn --test_mode all --test_dir "${CI_PROJECT_DIR}" || optest_status=$?
+      python ci_script/optest_to_junit.py "${CI_PROJECT_DIR}" "${RUNNER_TAG}_dtk${DTK_VERSION}_torch${TORCH_VERSION}_py${PY_VERSION}" || optest_status=1
+      exit "$optest_status"
+  artifacts:
+    name: "flashattn-${RUNNER_TAG}-dtk${DTK_VERSION}-torch${TORCH_VERSION}-py${PY_VERSION}"
+    when: always
+    paths:
+      - dist/*manylinux*.whl
+      - tests/${RUNNER_TAG}_dtk${DTK_VERSION}_torch${TORCH_VERSION}_py${PY_VERSION}_flashattn_performance_output.xml
+    reports:
+      junit: tests/${RUNNER_TAG}_dtk${DTK_VERSION}_torch${TORCH_VERSION}_py${PY_VERSION}_flashattn_performance_output.xml
+    expire_in: 7 days
+
+# 单文件模式（FLASH_ATTN_HG_SPLIT_CORE=0）全量回归，对应默认 split 的 build:flashattn-wheel。
+build:flashattn-wheel-single:
+  stage: build
+  image: "${HARBOR_SITE}/hcu/base/dtk:${DTK_VERSION}-rockylinux8.6-py${PY_VERSION}"
+  timeout: 3h
+  variables:
+    GIT_DEPTH: "0"
+    RUNNER_TAG: "nmz"
+    PY_VERSION: "3.12"
+  parallel:
+    matrix:
+      - TORCH_VERSION: ["2.11.0", "2.13.0"]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "aicc-master-dev"'
+  tags:
+    - nmz
+  before_script:
+    - PIP_TRUSTED_HOST="$(python -c 'import os; from urllib.parse import urlsplit; print(urlsplit(os.environ["PYPI_URL"]).hostname)')"
+    - export PIP_TRUSTED_HOST
+    - export DTK_PIP_INDEX_URL="${PYPI_URL}/nightly/dtk${DTK_VERSION//./}/+simple/"
+    - export PYTHON=python
+    - test -n "${TORCH_VERSION}"
+    - >-
+      python -m pip install "torch==${TORCH_VERSION}" triton
+      -i "${DTK_PIP_INDEX_URL}"
+      --trusted-host "${PIP_TRUSTED_HOST}"
+    - python -m pip install vllm --no-deps -i "${DTK_PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}"
+    - |
+      cat > /tmp/git-askpass.sh << 'SCRIPT'
+      #!/bin/sh
+      case "$1" in
+        *Username*) echo "gitlab-ci-token" ;;
+        *Password*) echo "$GIT_TOKEN" ;;
+      esac
+      SCRIPT
+    - chmod 700 /tmp/git-askpass.sh
+    - export GIT_ASKPASS=/tmp/git-askpass.sh
+    - export GIT_TERMINAL_PROMPT=0
+    - export GIT_TOKEN="${CI_JOB_TOKEN}"
+    - git config user.email "ci@local"
+    - git config user.name "CI"
+    - git fetch origin "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}"
+    - git merge "origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}" --no-edit
+    - git checkout -B _ci_single_mr
+  script:
+    - curl -fsSL "${AICC_BASE_URL}/hcu_llvm_installer.sh" -o /tmp/hcu_llvm_installer.sh
+    - bash /tmp/hcu_llvm_installer.sh
+    - FLASH_ATTN_HG_SPLIT_CORE=0 bash ci_script/build_wheel_and_manylinux.sh
+    - python ci_script/check_hg_wheel.py --wheel dist/*manylinux*.whl --expected-mode single
+    - python -m pip install optest -i "${DTK_PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}"
+    - python -m pip install --force-reinstall --no-deps dist/*manylinux*.whl
+    - |
+      optest_status=0
+      optest --op_name flashattn --test_mode all --test_dir "${CI_PROJECT_DIR}" || optest_status=$?
+      python ci_script/optest_to_junit.py "${CI_PROJECT_DIR}" "${RUNNER_TAG}_dtk${DTK_VERSION}_torch${TORCH_VERSION}_py${PY_VERSION}_single" || optest_status=1
+      exit "$optest_status"
+  artifacts:
+    name: "flashattn-${RUNNER_TAG}-dtk${DTK_VERSION}-torch${TORCH_VERSION}-py${PY_VERSION}-single"
+    when: always
+    paths:
+      - dist/*manylinux*.whl
+      - tests/${RUNNER_TAG}_dtk${DTK_VERSION}_torch${TORCH_VERSION}_py${PY_VERSION}_single_flashattn_performance_output.xml
+    reports:
+      junit: tests/${RUNNER_TAG}_dtk${DTK_VERSION}_torch${TORCH_VERSION}_py${PY_VERSION}_single_flashattn_performance_output.xml
+    expire_in: 7 days
+
+# Publish Python 3.12 wheels for DTK 26.10 / Torch 2.11 and 2.13.
+publish:
+  stage: publish
+  image: "${HARBOR_SITE}/hcu/base/dtk:${DTK_VERSION}-rockylinux8.6-py${PY_VERSION}"
+  timeout: 3h
+  tags:
+    - nmz
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME == "aicc-master-dev"'
+  parallel:
+    matrix:
+      - PY_VERSION: "3.12"
+        TORCH_VERSION: ["2.11.0", "2.13.0"]
+  before_script:
+    - PIP_TRUSTED_HOST="$(python -c 'import os; from urllib.parse import urlsplit; print(urlsplit(os.environ["PYPI_URL"]).hostname)')"
+    - export PIP_TRUSTED_HOST
+    - export DTK_PIP_INDEX_URL="${PYPI_URL}/nightly/dtk${DTK_VERSION//./}/+simple/"
+    - PIP_CONSTRAINT="$(mktemp)"
+    - export PIP_CONSTRAINT
+    - export PYTHON=python
+    - >-
+      python -m pip install "torch==${TORCH_VERSION}"
+      -i "${DTK_PIP_INDEX_URL}"
+      --trusted-host "${PIP_TRUSTED_HOST}"
+    - |
+      cat > /tmp/git-askpass.sh << 'SCRIPT'
+      #!/bin/sh
+      case "$1" in
+        *Username*) echo "gitlab-ci-token" ;;
+        *Password*) echo "$GIT_TOKEN" ;;
+      esac
+      SCRIPT
+    - chmod 700 /tmp/git-askpass.sh
+    - export GIT_ASKPASS=/tmp/git-askpass.sh
+    - export GIT_TERMINAL_PROMPT=0
+    - export GIT_TOKEN="${CI_JOB_TOKEN}"
+  script:
+    - curl -fsSL "${AICC_BASE_URL}/hcu_llvm_installer.sh" -o /tmp/hcu_llvm_installer.sh
+    - bash /tmp/hcu_llvm_installer.sh
+    - FLASH_ATTN_HG_SPLIT_CORE=1 bash ci_script/build_wheel_and_manylinux.sh
+    - python ci_script/check_hg_wheel.py --wheel dist/*manylinux*.whl --expected-mode split
+    - python -m pip install ciupload -i "${DTK_PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}"
+    - COMMIT_ID="$(git rev-parse --short=6 HEAD)"
+    - >-
+      CIUpload REPAIR --dtk_version "${DTK_VERSION//./}" --torch_version "${TORCH_VERSION}"
+      --git_commit ${COMMIT_ID} --outputdir output -f dist/*manylinux*.whl
+    - test -f output/*.whl
+    - CIUpload NIGHTLY --devpi_url "${PYPI_URL}" --password "${devpi_nightly_password}" --dtk_pkg_name "DTK-${DTK_VERSION}-Rocky8.6-x86_64.tar.gz" -f output/*.whl
+  artifacts:
+    name: "flashattn-dtk${DTK_VERSION}-torch${TORCH_VERSION}-py${PY_VERSION}"
+    paths:
+      - output/*.whl
+    expire_in: 30 days

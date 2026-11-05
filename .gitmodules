@@ -1,0 +1,4 @@
+[submodule "csrc/cutlass"]
+	path = csrc/cutlass
+	url = ../hytlass.git
+	branch = release
