@@ -2407,6 +2407,34 @@ def flash_attn_varlen_func(
 hg_flash_attn_varlen_func = flash_attn_varlen_func
 varlen_fwd_unified = flash_attn_varlen_func
 
+
+def _paged_layout(k, v, q, max_seqlen_q, cu_seqlens_q, block_table, window_size, softcap):
+    """Layout for the paged decode/verify shapes, "custom" otherwise.
+
+    The pool view is ``[pages, page_size, heads, dim]``; its exact stride
+    signature tells a page-major (bshd) pool from a head-major (bhsd) one.
+    Anything else, including the degenerate case where the two signatures
+    coincide, keeps the vLLM default.
+    """
+    if not (torch.is_tensor(k) and torch.is_tensor(v) and torch.is_tensor(cu_seqlens_q)):
+        return "custom"
+    if k.dim() != 4 or v.dim() != 4 or q.dim() != 3:
+        return "custom"
+    if max_seqlen_q is None or block_table is None or softcap != 0.0:
+        return "custom"
+    if window_size is not None and tuple(window_size) != (-1, -1):
+        return "custom"
+    if q.shape[-1] != v.shape[-1] or k.shape[-2] <= 0:
+        return "custom"
+    if q.shape[-2] % k.shape[-2]:
+        return "custom"
+    if q.shape[0] != (cu_seqlens_q.numel() - 1) * max_seqlen_q:
+        return "custom"
+    from flash_attn.paged_layout import paged_kv_layout
+
+    return paged_kv_layout(k, v)
+
+
 def vllm_flash_attn_varlen_func(
     q,
     k,
@@ -2460,7 +2488,9 @@ def vllm_flash_attn_varlen_func(
             block_table=block_table,
             return_softmax_lse=return_softmax_lse,
             out=out,
-            layout="custom",# bhsd,bshd,custom. The bhsd layout is recommended
+            layout=_paged_layout(
+                k, v, q, max_seqlen_q, cu_seqlens_q, block_table, window_size, softcap
+            ),
             # FA3 Only
             scheduler_metadata=scheduler_metadata,
             q_descale=q_descale,
